@@ -1,6 +1,6 @@
 // Major/minor chord detection from an FFT spectrum, via a 12-bin chroma (pitch-class) profile.
 
-import { NOTE_NAMES } from './pitch.js?v=1.2';
+import { NOTE_NAMES } from './pitch.js?v=1.3';
 
 const MIN_HZ = 75;
 const MAX_HZ = 2000;

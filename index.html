@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Play To Open v1.2</title>
+  <title>Play To Open v1.3</title>
   <style>
     :root {
       --bg: #111418;
@@ -27,13 +27,13 @@
     main {
       width: 100%;
       max-width: 480px;
+      min-height: 100%;
       padding: 24px 16px;
       display: flex;
       flex-direction: column;
       gap: 20px;
     }
-    h1 { margin: 0; font-size: 1.4rem; font-weight: 700; }
-    h1 .ver { color: var(--muted); font-weight: 400; font-size: 0.9rem; }
+    footer { margin-top: auto; text-align: center; color: var(--muted); font-size: 0.8rem; }
 
     input {
       width: 100%;
@@ -113,28 +113,28 @@
 </head>
 <body>
   <main>
-    <h1>Play To Open <span class="ver">v1.2</span></h1>
-
     <input id="word" type="text" placeholder="CAGE" autocomplete="off" autocapitalize="characters" spellcheck="false">
     <div class="hint" id="hint">Notes A–G only</div>
 
     <input id="chords" type="text" placeholder="E Am G" autocomplete="off" autocapitalize="off" spellcheck="false">
     <div class="hint" id="chordHint">Chords: A–G, add m for minor</div>
 
-    <div id="chips"><div class="row" id="noteRow"></div><div class="row" id="chordRow"></div></div>
-
     <button id="listen" disabled>Listen</button>
+
+    <div id="chips"><div class="row" id="noteRow"></div><div class="row" id="chordRow"></div></div>
 
     <div id="heard">Hearing<strong id="note">–</strong></div>
     <div id="level"><div></div></div>
+
+    <footer>Play To Open <span class="ver">v1.3</span></footer>
   </main>
 
   <div id="success">SUCCESS</div>
 
   <script type="module">
-    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.2';
-    import { detectChord } from './chord.js?v=1.2';
-    import { SequenceMatcher } from './sequence.js?v=1.2';
+    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.3';
+    import { detectChord } from './chord.js?v=1.3';
+    import { SequenceMatcher } from './sequence.js?v=1.3';
 
     const CHORD_STABLE_MS = 200; // strums are noisy at the start, so chords must hold a bit longer than notes
     const PITCH_WINDOW = 2048;   // samples used for single-note detection
