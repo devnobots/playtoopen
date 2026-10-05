@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Play To Open v1.5</title>
+  <title>Play To Open v1.6</title>
   <style>
     :root {
       --bg: #111418;
@@ -125,8 +125,9 @@
 
     <div id="heard">Hearing<strong id="note">–</strong></div>
     <div id="level"><div></div></div>
+    <div class="hint" id="micInfo"></div>
 
-    <footer>Play To Open <span class="ver">v1.5</span></footer>
+    <footer>Play To Open <span class="ver">v1.6</span></footer>
   </main>
 
   <div id="success">
@@ -135,9 +136,9 @@
   </div>
 
   <script type="module">
-    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.5';
-    import { detectChord } from './chord.js?v=1.5';
-    import { SequenceMatcher } from './sequence.js?v=1.5';
+    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.6';
+    import { detectChord } from './chord.js?v=1.6';
+    import { SequenceMatcher } from './sequence.js?v=1.6';
 
     const CHORD_STABLE_MS = 200; // strums are noisy at the start, so chords must hold a bit longer than notes
     const PITCH_WINDOW = 2048;   // samples used for single-note detection
@@ -153,6 +154,7 @@
     const noteEl = document.getElementById('note');
     const levelEl = document.querySelector('#level div');
     const successEl = document.getElementById('success');
+    const micInfoEl = document.getElementById('micInfo');
 
     let notes = [];
     let chords = [];
@@ -218,9 +220,17 @@
       }
     }
 
+    // Shows what the browser actually applied, not just what was requested.
+    function showMicSettings(stream) {
+      const s = stream.getAudioTracks()[0].getSettings();
+      const fmt = key => (s[key] === undefined ? 'n/a' : s[key] ? 'ON' : 'off');
+      micInfoEl.textContent = `echo cancellation: ${fmt('echoCancellation')} · noise suppression: ${fmt('noiseSuppression')} · auto gain: ${fmt('autoGainControl')}`;
+    }
+
     async function start() {
       try {
         const stream = await openMic();
+        showMicSettings(stream);
         const ctx = new AudioContext();
         await ctx.resume(); // created after an await, so iOS may start it suspended
         const analyser = ctx.createAnalyser();
