@@ -5,7 +5,7 @@ export const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A',
 const MIN_FREQ = 70;     // a little below low E on guitar (82 Hz)
 const MAX_FREQ = 1500;   // well above the useful range of most melodies
 const YIN_THRESHOLD = 0.15;
-const MIN_RMS = 0.01;    // below this the frame is treated as silence
+export const MIN_RMS = 0.01;   // below this the frame is treated as silence
 
 // Returns { freq, rms, clarity } or { freq: null, rms } when no clear pitch is found.
 export function detectPitch(buf, sampleRate) {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Play To Open v1.1</title>
+  <title>Play To Open v1.2</title>
   <style>
     :root {
       --bg: #111418;
@@ -47,12 +47,15 @@
       background: var(--chip);
       color: var(--fg);
     }
+    #chords { font-size: 1.6rem; letter-spacing: 0.1em; text-transform: none; }
     input:focus { outline: none; border-color: var(--accent); }
     .hint { color: var(--muted); font-size: 0.9rem; text-align: center; min-height: 1.2em; margin-top: -10px; }
 
-    #chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; min-height: 64px; }
+    #chips { display: flex; flex-direction: column; gap: 10px; min-height: 64px; }
+    .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+    .row:empty { display: none; }
     .chip {
-      width: 56px; height: 64px;
+      min-width: 56px; height: 64px; padding: 0 10px;
       display: grid; place-items: center;
       font-size: 1.8rem; font-weight: 700;
       border-radius: 10px;
@@ -110,12 +113,15 @@
 </head>
 <body>
   <main>
-    <h1>Play To Open <span class="ver">v1.1</span></h1>
+    <h1>Play To Open <span class="ver">v1.2</span></h1>
 
     <input id="word" type="text" placeholder="CAGE" autocomplete="off" autocapitalize="characters" spellcheck="false">
     <div class="hint" id="hint">Notes A–G only</div>
 
-    <div id="chips"></div>
+    <input id="chords" type="text" placeholder="E Am G" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="hint" id="chordHint">Chords: A–G, add m for minor</div>
+
+    <div id="chips"><div class="row" id="noteRow"></div><div class="row" id="chordRow"></div></div>
 
     <button id="listen" disabled>Listen</button>
 
@@ -126,19 +132,30 @@
   <div id="success">SUCCESS</div>
 
   <script type="module">
-    import { detectPitch, freqToNote } from './pitch.js?v=1.1';
-    import { SequenceMatcher } from './sequence.js?v=1.1';
+    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.2';
+    import { detectChord } from './chord.js?v=1.2';
+    import { SequenceMatcher } from './sequence.js?v=1.2';
+
+    const CHORD_STABLE_MS = 200; // strums are noisy at the start, so chords must hold a bit longer than notes
+    const PITCH_WINDOW = 2048;   // samples used for single-note detection
 
     const wordEl = document.getElementById('word');
     const hintEl = document.getElementById('hint');
+    const chordsEl = document.getElementById('chords');
+    const chordHintEl = document.getElementById('chordHint');
     const chipsEl = document.getElementById('chips');
+    const noteRowEl = document.getElementById('noteRow');
+    const chordRowEl = document.getElementById('chordRow');
     const listenBtn = document.getElementById('listen');
     const noteEl = document.getElementById('note');
     const levelEl = document.querySelector('#level div');
     const successEl = document.getElementById('success');
 
+    let notes = [];
+    let chords = [];
+    // Combined sequence: notes first, then chords. Prefixes keep note C and chord C distinct.
     let targets = [];
-    let audio = null; // { ctx, stream, analyser, buf }
+    let audio = null; // { ctx, stream, analyser, buf, spectrum }
     let matcher = null;
     let rafId = 0;
 
@@ -147,19 +164,34 @@
       const clean = raw.replace(/[^A-G]/g, '');
       hintEl.textContent = clean !== raw.replace(/\s/g, '') ? 'Only A–G are notes — other letters removed' : 'Notes A–G only';
       wordEl.value = clean;
-      targets = clean.split('');
+      notes = clean.split('');
+      inputsChanged();
+    });
+
+    chordsEl.addEventListener('input', () => {
+      const tokens = chordsEl.value.split(/[\s,]+/).filter(Boolean);
+      const bad = tokens.filter(t => !/^[a-g]m?$/i.test(t));
+      chords = tokens.filter(t => /^[a-g]m?$/i.test(t)).map(t => t[0].toUpperCase() + (t.length > 1 ? 'm' : ''));
+      chordHintEl.textContent = bad.length ? 'Not a chord: ' + bad.join(' ') : 'Chords: A–G, add m for minor';
+      inputsChanged();
+    });
+
+    function inputsChanged() {
+      targets = [...notes.map(n => 'n:' + n), ...chords.map(c => 'c:' + c)];
       if (audio) stop();
       renderChips(0);
       listenBtn.disabled = targets.length === 0;
-    });
+    }
 
     function renderChips(doneCount) {
-      chipsEl.replaceChildren(...targets.map((n, i) => {
+      const chip = (label, i) => {
         const el = document.createElement('div');
         el.className = 'chip' + (i < doneCount ? ' done' : i === doneCount && audio ? ' next' : '');
-        el.textContent = n;
+        el.textContent = label;
         return el;
-      }));
+      };
+      noteRowEl.replaceChildren(...notes.map((n, i) => chip(n, i)));
+      chordRowEl.replaceChildren(...chords.map((c, i) => chip(c, notes.length + i)));
     }
 
     function shake() {
@@ -177,9 +209,14 @@
         });
         const ctx = new AudioContext();
         const analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
+        analyser.fftSize = 8192; // fine frequency resolution for chords
+        analyser.smoothingTimeConstant = 0;
         ctx.createMediaStreamSource(stream).connect(analyser);
-        audio = { ctx, stream, analyser, buf: new Float32Array(analyser.fftSize) };
+        audio = {
+          ctx, stream, analyser,
+          buf: new Float32Array(analyser.fftSize),
+          spectrum: new Float32Array(analyser.frequencyBinCount),
+        };
       } catch (err) {
         hintEl.textContent = 'Microphone unavailable: ' + err.message;
         return;
@@ -187,7 +224,7 @@
       matcher = new SequenceMatcher(targets);
       listenBtn.textContent = 'Stop';
       listenBtn.classList.add('listening');
-      wordEl.disabled = true;
+      wordEl.disabled = chordsEl.disabled = true;
       renderChips(0);
       tick();
     }
@@ -200,22 +237,31 @@
       matcher = null;
       listenBtn.textContent = 'Listen';
       listenBtn.classList.remove('listening');
-      wordEl.disabled = false;
+      wordEl.disabled = chordsEl.disabled = false;
       noteEl.textContent = '–';
       levelEl.style.width = '0';
       renderChips(0);
     }
 
     function tick() {
-      const { analyser, buf, ctx } = audio;
+      const { analyser, buf, spectrum, ctx } = audio;
       analyser.getFloatTimeDomainData(buf);
-      const { freq, rms } = detectPitch(buf, ctx.sampleRate);
-      const note = freq ? freqToNote(freq) : null;
+      const { freq, rms } = detectPitch(buf.subarray(buf.length - PITCH_WINDOW), ctx.sampleRate);
+      const chordPhase = targets[matcher.index].startsWith('c:');
 
-      noteEl.textContent = note ? note.name : '–';
+      let heard = null;
+      if (chordPhase) {
+        analyser.getFloatFrequencyData(spectrum);
+        heard = rms >= MIN_RMS ? detectChord(spectrum, ctx.sampleRate, analyser.fftSize) : null;
+      } else if (freq) {
+        heard = freqToNote(freq).name;
+      }
+
+      noteEl.textContent = heard ?? '–';
       levelEl.style.width = Math.min(100, rms * 400) + '%';
 
-      const ev = matcher.feed(note && note.name, rms, performance.now());
+      const token = heard && (chordPhase ? 'c:' : 'n:') + heard;
+      const ev = matcher.feed(token, rms, performance.now(), chordPhase ? CHORD_STABLE_MS : undefined);
       if (ev) handle(ev);
       if (audio) rafId = requestAnimationFrame(tick);
     }
