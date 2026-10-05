@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Play To Open v1.4</title>
+  <title>Play To Open v1.5</title>
   <style>
     :root {
       --bg: #111418;
@@ -126,7 +126,7 @@
     <div id="heard">Hearing<strong id="note">–</strong></div>
     <div id="level"><div></div></div>
 
-    <footer>Play To Open <span class="ver">v1.4</span></footer>
+    <footer>Play To Open <span class="ver">v1.5</span></footer>
   </main>
 
   <div id="success">
@@ -135,9 +135,9 @@
   </div>
 
   <script type="module">
-    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.4';
-    import { detectChord } from './chord.js?v=1.4';
-    import { SequenceMatcher } from './sequence.js?v=1.4';
+    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.5';
+    import { detectChord } from './chord.js?v=1.5';
+    import { SequenceMatcher } from './sequence.js?v=1.5';
 
     const CHORD_STABLE_MS = 200; // strums are noisy at the start, so chords must hold a bit longer than notes
     const PITCH_WINDOW = 2048;   // samples used for single-note detection
@@ -205,12 +205,24 @@
 
     listenBtn.addEventListener('click', () => (audio ? stop() : start()));
 
+    async function openMic() {
+      // iOS Safari refuses capture unless the page's audio session allows recording.
+      if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
+      const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        if (err.name === 'NotAllowedError' && /permission|denied/i.test(err.message)) throw err;
+        await new Promise(r => setTimeout(r, 300)); // transient iOS audio session errors often clear on retry
+        return navigator.mediaDevices.getUserMedia(constraints);
+      }
+    }
+
     async function start() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        });
+        const stream = await openMic();
         const ctx = new AudioContext();
+        await ctx.resume(); // created after an await, so iOS may start it suspended
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 8192; // fine frequency resolution for chords
         analyser.smoothingTimeConstant = 0;
@@ -221,7 +233,9 @@
           spectrum: new Float32Array(analyser.frequencyBinCount),
         };
       } catch (err) {
-        hintEl.textContent = 'Microphone unavailable: ' + err.message;
+        hintEl.textContent = /permission|denied/i.test(err.message)
+          ? 'Microphone permission denied — allow it in Settings → Apps → Safari → Microphone'
+          : 'Mic blocked by the browser — close other audio apps, then reload (' + err.message + ')';
         return;
       }
       matcher = new SequenceMatcher(targets);
