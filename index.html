@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Play To Open v1.3</title>
+  <title>Play To Open v1.4</title>
   <style>
     :root {
       --bg: #111418;
@@ -102,9 +102,9 @@
       background: var(--good);
       color: #0b1a10;
       font-size: 3.5rem; font-weight: 900; letter-spacing: 0.05em;
-      cursor: pointer;
     }
-    #success.show { display: grid; animation: flash 0.9s; }
+    #success.show { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 32px; animation: flash 0.9s; }
+    #playAgain { background: #000; color: #fff; font-size: 1.4rem; padding: 18px 40px; letter-spacing: normal; }
     @keyframes flash {
       0%, 30%, 60% { background: #ffffff; }
       15%, 45%, 100% { background: var(--good); }
@@ -126,15 +126,18 @@
     <div id="heard">Hearing<strong id="note">–</strong></div>
     <div id="level"><div></div></div>
 
-    <footer>Play To Open <span class="ver">v1.3</span></footer>
+    <footer>Play To Open <span class="ver">v1.4</span></footer>
   </main>
 
-  <div id="success">SUCCESS</div>
+  <div id="success">
+    <div>SUCCESS</div>
+    <button id="playAgain">Play again</button>
+  </div>
 
   <script type="module">
-    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.3';
-    import { detectChord } from './chord.js?v=1.3';
-    import { SequenceMatcher } from './sequence.js?v=1.3';
+    import { detectPitch, freqToNote, MIN_RMS } from './pitch.js?v=1.4';
+    import { detectChord } from './chord.js?v=1.4';
+    import { SequenceMatcher } from './sequence.js?v=1.4';
 
     const CHORD_STABLE_MS = 200; // strums are noisy at the start, so chords must hold a bit longer than notes
     const PITCH_WINDOW = 2048;   // samples used for single-note detection
@@ -276,10 +279,7 @@
       }
     }
 
-    successEl.addEventListener('click', () => {
-      successEl.classList.remove('show');
-      renderChips(0);
-    });
+    document.getElementById('playAgain').addEventListener('click', () => location.reload());
   </script>
 </body>
 </html>
