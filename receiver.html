@@ -56,24 +56,26 @@
   <div id="result"><div id="verdict">Pick a test</div><div id="detail"></div></div>
 
   <ol id="log"></ol>
-  <footer>Play To Open · receiver</footer>
+  <footer>Play To Open · receiver v2</footer>
 </main>
 
 <script type="module">
-  import { detectPitch, MIN_RMS } from './pitch.js?v=1.6';
+  import { detectPitch } from './pitch.js?v=1.6';
 
-  const PITCH_WINDOW = 2048;
+  // receiver v2: level-normalised pitch, short-window clap onsets, self-explaining misses
+  const WINDOW = 2048;      // samples analysed per frame
+  const SHORT = 512;        // short window for claps and attacks (~11 ms)
   const $ = id => document.getElementById(id);
   const NAMES = { ready: 'Ready hum', echo: 'Echo claps', ring: 'Instrument note', highlow: 'High or low' };
 
-  let audio = null;        // { ctx, analyser, buf }
-  let floor = 0.004;       // the room's quiet level, measured at start
-  let middle = null;       // the room's comfortable hum pitch, from test 1
-  let current = null;      // selected test
-  let judge = null;        // active test's frame handler
+  let audio = null;
+  let floor = 0.002;        // the room's quiet level, measured at start
+  let middle = null;
+  let current = null;
+  let judge = null;
+  let peak = 0;             // loudest level heard during the current test
   let wakeLock = null;
 
-  /* ---------- microphone (same approach as index.html) ---------- */
   async function openMic() {
     if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
     const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
@@ -95,15 +97,15 @@
       const ctx = new AudioContext();
       await ctx.resume();
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = PITCH_WINDOW;
+      analyser.fftSize = WINDOW;
       analyser.smoothingTimeConstant = 0;
       ctx.createMediaStreamSource(stream).connect(analyser);
-      audio = { ctx, analyser, buf: new Float32Array(PITCH_WINDOW) };
+      audio = { ctx, analyser, buf: new Float32Array(WINDOW), scaled: new Float32Array(WINDOW) };
       try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
       $('micBtn').disabled = true;
-      $('micBtn').textContent = 'Measuring room quiet…';
+      $('micBtn').textContent = 'Stay quiet: measuring the room…';
       await measureFloor();
-      $('micBtn').textContent = 'Microphone on';
+      $('micBtn').textContent = `Microphone on · room quiet level ${floor.toFixed(4)}`;
       $('listenBtn').disabled = !current;
       loop();
     } catch (err) {
@@ -115,15 +117,35 @@
 
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible' && audio) {
+      if (audio.ctx.state !== 'running') { try { await audio.ctx.resume(); } catch (e) {} }
       try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
     }
   });
 
+  /* ---------- thresholds (all relative to the room, with low absolute minimums) ---------- */
+  const soundLevel = () => Math.max(floor * 3, 0.003);   // "something is sounding"
+  const onsetLevel = () => Math.max(floor * 4, 0.004);   // minimum for a clap or attack
+
   /* ---------- per-frame analysis ---------- */
+  function rmsOf(b, from) {
+    let s = 0; for (let i = from; i < b.length; i++) s += b[i] * b[i];
+    return Math.sqrt(s / (b.length - from));
+  }
+
   function frame() {
-    audio.analyser.getFloatTimeDomainData(audio.buf);
-    const { freq, rms } = detectPitch(audio.buf, audio.ctx.sampleRate);
-    return { rms, pitch: freq || null, t: performance.now() / 1000 };
+    const { analyser, buf, scaled, ctx } = audio;
+    analyser.getFloatTimeDomainData(buf);
+    const rms = rmsOf(buf, 0);
+    const short = rmsOf(buf, WINDOW - SHORT);
+    let pitch = null;
+    if (rms > soundLevel()) {
+      // Normalise to a healthy level so pitch.js's fixed silence gate doesn't hide quiet sounds.
+      const g = Math.min(0.1 / rms, 60);
+      for (let i = 0; i < WINDOW; i++) scaled[i] = buf[i] * g;
+      pitch = detectPitch(scaled, ctx.sampleRate).freq || null;
+    }
+    if (judge) peak = Math.max(peak, short, rms);
+    return { rms, short, pitch, t: performance.now() / 1000 };
   }
 
   function measureFloor() {
@@ -132,15 +154,20 @@
       (function tick() {
         vals.push(frame().rms);
         if (performance.now() - t0 < 1200) requestAnimationFrame(tick);
-        else { vals.sort((a, b) => a - b); floor = Math.max(vals[vals.length >> 1], 0.002); res(); }
+        else {
+          vals.sort((a, b) => a - b);
+          // Use a low percentile so a bump during measuring can't inflate every threshold.
+          floor = Math.min(Math.max(vals[Math.floor(vals.length * 0.25)], 0.0005), 0.004);
+          res();
+        }
       })();
     });
   }
 
   function loop() {
     const f = frame();
-    document.querySelector('#level div').style.width = Math.min(100, f.rms * 400) + '%';
-    $('liveLevel').textContent = 'Level ' + f.rms.toFixed(3);
+    document.querySelector('#level div').style.width = Math.min(100, f.rms * 800) + '%';
+    $('liveLevel').textContent = 'Level ' + f.rms.toFixed(4);
     $('livePitch').textContent = 'Pitch ' + (f.pitch ? Math.round(f.pitch) + ' Hz' : '–');
     $('liveMid').textContent = 'Middle ' + (middle ? Math.round(middle) + ' Hz' : '–');
     if (judge) judge(f);
@@ -152,78 +179,83 @@
     document.querySelectorAll('[data-test]').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     current = b.dataset.test;
-    show('', NAMES[current], 'Tap Listen, then play the sound on the computer.');
+    show('', NAMES[current], 'Tap Listen, then play the sound.');
     $('listenBtn').disabled = !audio;
   });
 
   $('listenBtn').onclick = () => {
     if (!current || !audio) return;
+    peak = 0;
     show('', 'Listening…', '');
     $('listenBtn').disabled = true;
     $('listenBtn').classList.add('listening');
     ({ ready: testReady, echo: testEcho, ring: testRing, highlow: testHighLow })[current]();
   };
 
-  const loud = f => f.rms > Math.max(floor * 4, MIN_RMS);
   const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+  const levels = need => ` (loudest ${peak.toFixed(4)}, needed ${need.toFixed(4)})`;
 
-  // 1. A sustained sound of about 2 s. Its pitch becomes the room's "middle".
+  // 1. A sustained, pitched sound of about 2 s. Its pitch becomes the room's "middle".
   function testReady() {
-    let start = null, last = null, pitches = [];
+    let start = null, last = null; const pitches = [];
     const t0 = performance.now() / 1000;
     judge = f => {
-      if (loud(f)) { start ??= f.t; last = f.t; if (f.pitch) pitches.push(f.pitch); }
-      else if (start !== null && f.t - last > 0.25) {
+      if (f.rms > soundLevel() && f.pitch) { start ??= f.t; last = f.t; pitches.push(f.pitch); }
+      else if (start !== null && f.t - last > 0.3) {
         const dur = last - start;
-        if (dur >= 1.8 && pitches.length > 10) {
+        if (dur >= 1.6 && pitches.length > 10) {
           middle = median(pitches);
           return finish(true, `Held ${dur.toFixed(1)} s · middle pitch ${Math.round(middle)} Hz`);
         }
         return finish(false, `Too short: ${dur.toFixed(1)} s (needs about 2 s)`);
       }
-      if (start === null && f.t - t0 > 12) finish(false, 'Heard nothing loud enough in 12 s');
+      if (start === null && f.t - t0 > 12) finish(false, 'Heard no steady hum in 12 s' + levels(soundLevel()));
     };
   }
 
   // 2. Five hits in a 2 + 3 pattern, with a clear pause after the second.
   function testEcho() {
-    const onsets = []; let prev = 0, lastOn = -1;
+    const onsets = []; let slow = floor, lastOn = -1;
     const t0 = performance.now() / 1000;
     judge = f => {
-      if (f.rms > Math.max(floor * 6, 0.02) && f.rms > prev * 1.8 && f.t - lastOn > 0.09) { onsets.push(f.t); lastOn = f.t; }
-      prev = f.rms * 0.6 + prev * 0.4;
+      if (f.short > onsetLevel() && f.short > slow * 2.5 && f.t - lastOn > 0.12) { onsets.push(f.t); lastOn = f.t; }
+      slow = slow * 0.85 + f.short * 0.15;
       if (onsets.length && f.t - onsets[onsets.length - 1] > 1.4) {
-        if (onsets.length !== 5) return finish(false, `Counted ${onsets.length} claps (needs 5)`);
+        if (onsets.length !== 5) return finish(false, `Counted ${onsets.length} claps (needs 5)` + levels(onsetLevel()));
         const gaps = onsets.slice(1).map((x, i) => x - onsets[i]);
         const avg = (gaps[0] + gaps[2] + gaps[3]) / 3;
         return gaps[1] > avg * 1.6
           ? finish(true, `5 claps · pause after the 2nd: ${gaps[1].toFixed(2)} s vs ${avg.toFixed(2)} s`)
           : finish(false, `5 claps, but no clear pause after the 2nd (gaps ${gaps.map(g => g.toFixed(2)).join(', ')})`);
       }
-      if (!onsets.length && f.t - t0 > 15) finish(false, 'Heard no claps in 15 s');
+      if (!onsets.length && f.t - t0 > 15) finish(false, 'Heard no claps in 15 s' + levels(onsetLevel()));
     };
   }
 
   // 3. One pitched note that rings and fades (struck or plucked), unlike a held hum.
   function testRing() {
-    let on = null, prev = 0; const frames = [];
+    let on = null, slow = floor; const frames = [];
     const t0 = performance.now() / 1000;
     judge = f => {
       if (on === null) {
-        if (f.rms > Math.max(floor * 6, 0.02) && f.rms > prev * 1.8) on = f.t;
-        prev = f.rms * 0.6 + prev * 0.4;
-        if (f.t - t0 > 12) finish(false, 'Heard no note in 12 s');
+        if (f.short > onsetLevel() && f.short > slow * 2.5) on = f.t;
+        slow = slow * 0.85 + f.short * 0.15;
+        if (on === null && f.t - t0 > 12) finish(false, 'Heard no note in 12 s' + levels(onsetLevel()));
         return;
       }
       frames.push(f);
       if (f.t - on < 1.6) return;
-      const pitched = frames.filter(x => x.pitch).map(x => x.pitch);
-      if (pitched.length < frames.length * 0.5) return finish(false, 'No clear pitch: was it a note?');
+      // Judge pitch only while the note is still audible; the fading tail is expected to go quiet.
+      const audible = frames.filter(x => x.rms > soundLevel());
+      const pitched = audible.filter(x => x.pitch).map(x => x.pitch);
+      if (pitched.length < 6 || pitched.length < audible.length * 0.4)
+        return finish(false, `No clear pitch: ${pitched.length} of ${audible.length} audible moments had a pitch` + levels(soundLevel()));
       const hz = Math.round(median(pitched));
-      const peak = Math.max(...frames.slice(0, 12).map(x => x.rms));
-      const tail = frames.slice(-12).reduce((a, x) => a + x.rms, 0) / 12;
-      const pct = Math.round((tail / peak) * 100);
-      return tail / peak < 0.5
+      const head = Math.max(...frames.slice(0, 18).map(x => x.rms));
+      const tailFrames = frames.slice(-18);
+      const tail = tailFrames.reduce((a, x) => a + x.rms, 0) / tailFrames.length;
+      const pct = Math.round((tail / head) * 100);
+      return tail / head < 0.5
         ? finish(true, `Note about ${hz} Hz, fading to ${pct}% of its start`)
         : finish(false, `Note about ${hz} Hz held steady (${pct}%): sounds like a hum, not a ring`);
     };
@@ -235,15 +267,15 @@
     let start = null, last = null; const pitches = [];
     const t0 = performance.now() / 1000;
     judge = f => {
-      if (loud(f) && f.pitch) { start ??= f.t; last = f.t; pitches.push(f.pitch); }
-      else if (start !== null && f.t - last > 0.25) {
-        if (last - start < 0.8) return finish(false, 'Too short: hold it a little longer');
+      if (f.rms > soundLevel() && f.pitch) { start ??= f.t; last = f.t; pitches.push(f.pitch); }
+      else if (start !== null && f.t - last > 0.3) {
+        if (last - start < 0.6) return finish(false, `Too short (${(last - start).toFixed(1)} s): hold it a little longer`);
         const hz = median(pitches), r = hz / middle;
         if (r > 1.12) return finish(true, `HIGH (happy): ${Math.round(hz)} Hz vs middle ${Math.round(middle)} Hz`);
         if (r < 0.89) return finish(true, `LOW (sad): ${Math.round(hz)} Hz vs middle ${Math.round(middle)} Hz`);
         return finish(false, `Too close to the middle: ${Math.round(hz)} Hz vs ${Math.round(middle)} Hz`);
       }
-      if (start === null && f.t - t0 > 12) finish(false, 'Heard no hum in 12 s');
+      if (start === null && f.t - t0 > 12) finish(false, 'Heard no steady hum in 12 s' + levels(soundLevel()));
     };
   }
 
