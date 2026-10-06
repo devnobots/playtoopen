@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Play To Open · Receiver</title>
+  <style>
+    :root { --bg:#111418; --fg:#f2f4f7; --muted:#8a93a0; --chip:#232831; --chip-border:#353c48;
+      --accent:#4f8cff; --good:#2ecc71; --bad:#ff4d4f; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; }
+    body { background:var(--bg); color:var(--fg);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; justify-content:center; }
+    main { width:100%; max-width:480px; padding:24px 16px 40px; display:flex; flex-direction:column; gap:16px; }
+    h1 { font-size:1.4rem; margin:0; }
+    .hint { color:var(--muted); font-size:.9rem; text-align:center; line-height:1.4; }
+    button { font-size:1.2rem; font-weight:700; padding:16px; border-radius:14px; border:none;
+      background:var(--accent); color:#fff; cursor:pointer; }
+    button:disabled { opacity:.4; cursor:default; }
+    button.listening { background:var(--bad); }
+    .tests { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .tests button { font-size:1rem; padding:14px 8px; background:var(--chip); border:2px solid var(--chip-border); }
+    .tests button.active { border-color:var(--accent); }
+    #level { height:6px; border-radius:3px; background:var(--chip); overflow:hidden; }
+    #level div { height:100%; width:0; background:var(--accent); transition:width .05s; }
+    .live { display:flex; justify-content:space-between; color:var(--muted); font-size:.9rem; }
+    #result { border-radius:14px; padding:22px 14px; text-align:center; background:var(--chip);
+      border:2px solid var(--chip-border); }
+    #result.pass { background:var(--good); border-color:var(--good); color:#0b1a10; }
+    #result.miss { border-color:var(--bad); }
+    #verdict { font-size:1.8rem; font-weight:900; }
+    #detail { margin-top:6px; font-size:.95rem; }
+    ol { margin:0; padding-left:1.2em; color:var(--muted); font-size:.85rem; display:flex; flex-direction:column; gap:4px; }
+    ol li.pass { color:var(--fg); }
+    footer { text-align:center; color:var(--muted); font-size:.8rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Receiver</h1>
+  <div class="hint">Play the test sounds from <strong>player.html</strong> on a computer. Pick a test, tap Listen, then click the matching sound.</div>
+
+  <button id="micBtn">Allow microphone</button>
+  <div class="hint" id="micInfo">Microphone off.</div>
+  <div id="level"><div></div></div>
+  <div class="live"><span id="liveLevel">Level –</span><span id="livePitch">Pitch –</span><span id="liveMid">Middle –</span></div>
+
+  <div class="tests">
+    <button data-test="ready">1. Ready hum</button>
+    <button data-test="echo">2. Echo claps</button>
+    <button data-test="ring">3. Instrument note</button>
+    <button data-test="highlow">4. High or low</button>
+  </div>
+  <button id="listenBtn" disabled>Listen</button>
+
+  <div id="result"><div id="verdict">Pick a test</div><div id="detail"></div></div>
+
+  <ol id="log"></ol>
+  <footer>Play To Open · receiver</footer>
+</main>
+
+<script type="module">
+  import { detectPitch, MIN_RMS } from './pitch.js?v=1.6';
+
+  const PITCH_WINDOW = 2048;
+  const $ = id => document.getElementById(id);
+  const NAMES = { ready: 'Ready hum', echo: 'Echo claps', ring: 'Instrument note', highlow: 'High or low' };
+
+  let audio = null;        // { ctx, analyser, buf }
+  let floor = 0.004;       // the room's quiet level, measured at start
+  let middle = null;       // the room's comfortable hum pitch, from test 1
+  let current = null;      // selected test
+  let judge = null;        // active test's frame handler
+  let wakeLock = null;
+
+  /* ---------- microphone (same approach as index.html) ---------- */
+  async function openMic() {
+    if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
+    const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+    try { return await navigator.mediaDevices.getUserMedia(constraints); }
+    catch (err) {
+      if (err.name === 'NotAllowedError' && /permission|denied/i.test(err.message)) throw err;
+      await new Promise(r => setTimeout(r, 300));
+      return navigator.mediaDevices.getUserMedia(constraints);
+    }
+  }
+
+  $('micBtn').onclick = async () => {
+    try {
+      const stream = await openMic();
+      const s = stream.getAudioTracks()[0].getSettings();
+      const fmt = k => s[k] === undefined ? 'n/a' : s[k] ? 'ON (bad)' : 'off';
+      $('micInfo').textContent =
+        `Echo cancellation: ${fmt('echoCancellation')} · Noise suppression: ${fmt('noiseSuppression')} · Auto gain: ${fmt('autoGainControl')}`;
+      const ctx = new AudioContext();
+      await ctx.resume();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = PITCH_WINDOW;
+      analyser.smoothingTimeConstant = 0;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      audio = { ctx, analyser, buf: new Float32Array(PITCH_WINDOW) };
+      try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
+      $('micBtn').disabled = true;
+      $('micBtn').textContent = 'Measuring room quiet…';
+      await measureFloor();
+      $('micBtn').textContent = 'Microphone on';
+      $('listenBtn').disabled = !current;
+      loop();
+    } catch (err) {
+      $('micInfo').textContent = /permission|denied/i.test(err.message)
+        ? 'Microphone permission denied. Allow it in Settings → Apps → Safari → Microphone.'
+        : 'Microphone blocked: ' + err.message;
+    }
+  };
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && audio) {
+      try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
+    }
+  });
+
+  /* ---------- per-frame analysis ---------- */
+  function frame() {
+    audio.analyser.getFloatTimeDomainData(audio.buf);
+    const { freq, rms } = detectPitch(audio.buf, audio.ctx.sampleRate);
+    return { rms, pitch: freq || null, t: performance.now() / 1000 };
+  }
+
+  function measureFloor() {
+    return new Promise(res => {
+      const vals = [], t0 = performance.now();
+      (function tick() {
+        vals.push(frame().rms);
+        if (performance.now() - t0 < 1200) requestAnimationFrame(tick);
+        else { vals.sort((a, b) => a - b); floor = Math.max(vals[vals.length >> 1], 0.002); res(); }
+      })();
+    });
+  }
+
+  function loop() {
+    const f = frame();
+    document.querySelector('#level div').style.width = Math.min(100, f.rms * 400) + '%';
+    $('liveLevel').textContent = 'Level ' + f.rms.toFixed(3);
+    $('livePitch').textContent = 'Pitch ' + (f.pitch ? Math.round(f.pitch) + ' Hz' : '–');
+    $('liveMid').textContent = 'Middle ' + (middle ? Math.round(middle) + ' Hz' : '–');
+    if (judge) judge(f);
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- choosing and running tests ---------- */
+  document.querySelectorAll('[data-test]').forEach(b => b.onclick = () => {
+    document.querySelectorAll('[data-test]').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    current = b.dataset.test;
+    show('', NAMES[current], 'Tap Listen, then play the sound on the computer.');
+    $('listenBtn').disabled = !audio;
+  });
+
+  $('listenBtn').onclick = () => {
+    if (!current || !audio) return;
+    show('', 'Listening…', '');
+    $('listenBtn').disabled = true;
+    $('listenBtn').classList.add('listening');
+    ({ ready: testReady, echo: testEcho, ring: testRing, highlow: testHighLow })[current]();
+  };
+
+  const loud = f => f.rms > Math.max(floor * 4, MIN_RMS);
+  const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+
+  // 1. A sustained sound of about 2 s. Its pitch becomes the room's "middle".
+  function testReady() {
+    let start = null, last = null, pitches = [];
+    const t0 = performance.now() / 1000;
+    judge = f => {
+      if (loud(f)) { start ??= f.t; last = f.t; if (f.pitch) pitches.push(f.pitch); }
+      else if (start !== null && f.t - last > 0.25) {
+        const dur = last - start;
+        if (dur >= 1.8 && pitches.length > 10) {
+          middle = median(pitches);
+          return finish(true, `Held ${dur.toFixed(1)} s · middle pitch ${Math.round(middle)} Hz`);
+        }
+        return finish(false, `Too short: ${dur.toFixed(1)} s (needs about 2 s)`);
+      }
+      if (start === null && f.t - t0 > 12) finish(false, 'Heard nothing loud enough in 12 s');
+    };
+  }
+
+  // 2. Five hits in a 2 + 3 pattern, with a clear pause after the second.
+  function testEcho() {
+    const onsets = []; let prev = 0, lastOn = -1;
+    const t0 = performance.now() / 1000;
+    judge = f => {
+      if (f.rms > Math.max(floor * 6, 0.02) && f.rms > prev * 1.8 && f.t - lastOn > 0.09) { onsets.push(f.t); lastOn = f.t; }
+      prev = f.rms * 0.6 + prev * 0.4;
+      if (onsets.length && f.t - onsets[onsets.length - 1] > 1.4) {
+        if (onsets.length !== 5) return finish(false, `Counted ${onsets.length} claps (needs 5)`);
+        const gaps = onsets.slice(1).map((x, i) => x - onsets[i]);
+        const avg = (gaps[0] + gaps[2] + gaps[3]) / 3;
+        return gaps[1] > avg * 1.6
+          ? finish(true, `5 claps · pause after the 2nd: ${gaps[1].toFixed(2)} s vs ${avg.toFixed(2)} s`)
+          : finish(false, `5 claps, but no clear pause after the 2nd (gaps ${gaps.map(g => g.toFixed(2)).join(', ')})`);
+      }
+      if (!onsets.length && f.t - t0 > 15) finish(false, 'Heard no claps in 15 s');
+    };
+  }
+
+  // 3. One pitched note that rings and fades (struck or plucked), unlike a held hum.
+  function testRing() {
+    let on = null, prev = 0; const frames = [];
+    const t0 = performance.now() / 1000;
+    judge = f => {
+      if (on === null) {
+        if (f.rms > Math.max(floor * 6, 0.02) && f.rms > prev * 1.8) on = f.t;
+        prev = f.rms * 0.6 + prev * 0.4;
+        if (f.t - t0 > 12) finish(false, 'Heard no note in 12 s');
+        return;
+      }
+      frames.push(f);
+      if (f.t - on < 1.6) return;
+      const pitched = frames.filter(x => x.pitch).map(x => x.pitch);
+      if (pitched.length < frames.length * 0.5) return finish(false, 'No clear pitch: was it a note?');
+      const hz = Math.round(median(pitched));
+      const peak = Math.max(...frames.slice(0, 12).map(x => x.rms));
+      const tail = frames.slice(-12).reduce((a, x) => a + x.rms, 0) / 12;
+      const pct = Math.round((tail / peak) * 100);
+      return tail / peak < 0.5
+        ? finish(true, `Note about ${hz} Hz, fading to ${pct}% of its start`)
+        : finish(false, `Note about ${hz} Hz held steady (${pct}%): sounds like a hum, not a ring`);
+    };
+  }
+
+  // 4. Higher or lower than the room's middle (from test 1).
+  function testHighLow() {
+    if (!middle) return finish(false, 'Run test 1 (ready hum) first, to set the middle');
+    let start = null, last = null; const pitches = [];
+    const t0 = performance.now() / 1000;
+    judge = f => {
+      if (loud(f) && f.pitch) { start ??= f.t; last = f.t; pitches.push(f.pitch); }
+      else if (start !== null && f.t - last > 0.25) {
+        if (last - start < 0.8) return finish(false, 'Too short: hold it a little longer');
+        const hz = median(pitches), r = hz / middle;
+        if (r > 1.12) return finish(true, `HIGH (happy): ${Math.round(hz)} Hz vs middle ${Math.round(middle)} Hz`);
+        if (r < 0.89) return finish(true, `LOW (sad): ${Math.round(hz)} Hz vs middle ${Math.round(middle)} Hz`);
+        return finish(false, `Too close to the middle: ${Math.round(hz)} Hz vs ${Math.round(middle)} Hz`);
+      }
+      if (start === null && f.t - t0 > 12) finish(false, 'Heard no hum in 12 s');
+    };
+  }
+
+  function finish(ok, detail) {
+    judge = null;
+    show(ok ? 'pass' : 'miss', ok ? 'Pass' : 'Miss', detail);
+    const li = document.createElement('li');
+    li.className = ok ? 'pass' : '';
+    li.textContent = `${ok ? 'Pass' : 'Miss'} · ${NAMES[current]} · ${detail}`;
+    $('log').prepend(li);
+    $('listenBtn').disabled = false;
+    $('listenBtn').classList.remove('listening');
+  }
+
+  function show(state, verdict, detail) {
+    $('result').className = state;
+    $('verdict').textContent = verdict;
+    $('detail').textContent = detail;
+  }
+</script>
+</body>
+</html>

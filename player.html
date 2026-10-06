@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Play To Open · Test sounds</title>
+  <style>
+    :root { --bg:#111418; --fg:#f2f4f7; --muted:#8a93a0; --chip:#232831; --chip-border:#353c48; --accent:#4f8cff; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; justify-content:center; }
+    main { width:100%; max-width:720px; padding:28px 20px 60px; }
+    h1 { font-size:1.6rem; margin:0 0 6px; }
+    h2 { font-size:1.1rem; margin:28px 0 8px; }
+    p { margin:6px 0; color:var(--muted); max-width:62ch; line-height:1.5; }
+    .row { display:flex; flex-wrap:wrap; gap:8px; }
+    button { font:inherit; font-weight:600; padding:12px 16px; border-radius:10px; cursor:pointer;
+      background:var(--accent); color:#fff; border:2px solid var(--accent); min-height:44px; }
+    button.miss { background:var(--chip); color:var(--fg); border:2px dashed var(--chip-border); }
+    button.quiet { background:var(--chip); color:var(--fg); border-color:var(--chip-border); }
+    button:focus-visible { outline:2px solid var(--fg); outline-offset:2px; }
+    footer { margin-top:40px; color:var(--muted); font-size:.85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Test sounds</h1>
+  <p>Open <strong>receiver.html</strong> on the phone. Set this computer's volume to about half and hold the phone 30–60 cm from the speakers.</p>
+  <p>On the phone, pick the test and tap Listen, then click a sound here. Solid buttons should pass. Dashed buttons are deliberate mistakes and should miss.</p>
+
+  <h2>1. Ready hum (about 2.5 s)</h2>
+  <div class="row">
+    <button onclick="S.hum(130,2.5)">Low voice</button>
+    <button onclick="S.hum(210,2.5)">Middle voice</button>
+    <button onclick="S.hum(300,2.5)">Child's voice</button>
+    <button class="miss" onclick="S.hum(210,0.6)">Too short</button>
+  </div>
+
+  <h2>2. Echo claps (two, a pause, three)</h2>
+  <div class="row">
+    <button onclick="S.claps([0,.35,1.25,1.5,1.75])">2 + 3</button>
+    <button onclick="S.claps([0,.45,1.6,1.9,2.2])">2 + 3, slower</button>
+    <button class="miss" onclick="S.claps([0,.3,.6,1.5,1.8])">3 + 2</button>
+    <button class="miss" onclick="S.claps([0,.35,.7,1.05,1.4])">5 even claps</button>
+  </div>
+
+  <h2>3. Instrument note (one note, left to ring)</h2>
+  <div class="row">
+    <button onclick="S.pluck(220)">Plucked A3</button>
+    <button onclick="S.pluck(330)">Plucked E4</button>
+    <button onclick="S.piano(262)">Piano-like C4</button>
+    <button class="miss" onclick="S.held(220,2.2)">Held, not ringing</button>
+  </div>
+
+  <h2>4. High or low (run test 1 with the middle voice first)</h2>
+  <div class="row">
+    <button onclick="S.hum(290,1.8)">High</button>
+    <button onclick="S.hum(150,1.8)">Low</button>
+    <button class="miss" onclick="S.hum(215,1.8)">Too close to the middle</button>
+  </div>
+
+  <h2>Living-room noise</h2>
+  <p>Leave it running and repeat the tests above.</p>
+  <div class="row"><button class="quiet" id="noiseBtn" onclick="S.toggleNoise()">Start background noise</button></div>
+
+  <h2>Story sounds (not judged)</h2>
+  <div class="row">
+    <button class="quiet" onclick="S.chord([220,261.6,329.6])">A minor (sad)</button>
+    <button class="quiet" onclick="S.chord([261.6,329.6,392])">C major (happy)</button>
+    <button class="quiet" onclick="S.knocks([0,.35,1.25,1.5,1.75])">Elias's knock</button>
+  </div>
+
+  <footer>Play To Open · test sounds</footer>
+</main>
+
+<script>
+const S = (() => {
+  let ctx, noise;
+  const ac = () => (ctx ||= new (window.AudioContext || window.webkitAudioContext)());
+
+  function noiseBuffer(c, secs) {
+    const b = c.createBuffer(1, c.sampleRate * secs, c.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    return b;
+  }
+
+  // Voice-like hum: filtered sawtooth with gentle vibrato
+  function hum(freq, dur) {
+    const c = ac(), t = c.currentTime + 0.05;
+    const o = c.createOscillator(); o.type = 'sawtooth'; o.frequency.value = freq;
+    const vib = c.createOscillator(); vib.frequency.value = 5;
+    const vibG = c.createGain(); vibG.gain.value = freq * 0.012;
+    vib.connect(vibG).connect(o.frequency);
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.35, t + 0.08);
+    g.gain.setValueAtTime(0.35, t + dur - 0.15); g.gain.linearRampToValueAtTime(0, t + dur);
+    o.connect(lp).connect(g).connect(c.destination);
+    o.start(t); vib.start(t); o.stop(t + dur + 0.05); vib.stop(t + dur + 0.05);
+  }
+
+  function clapAt(c, t) {
+    const s = c.createBufferSource(); s.buffer = noiseBuffer(c, 0.12);
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1400; bp.Q.value = 0.7;
+    const g = c.createGain(); g.gain.setValueAtTime(0.9, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    s.connect(bp).connect(g).connect(c.destination); s.start(t);
+  }
+  const claps = times => { const c = ac(), t0 = c.currentTime + 0.1; times.forEach(x => clapAt(c, t0 + x)); };
+
+  function knockAt(c, t) {
+    const o = c.createOscillator(); o.frequency.setValueAtTime(180, t);
+    o.frequency.exponentialRampToValueAtTime(90, t + 0.08);
+    const g = c.createGain(); g.gain.setValueAtTime(0.8, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(g).connect(c.destination); o.start(t); o.stop(t + 0.15);
+  }
+  const knocks = times => { const c = ac(), t0 = c.currentTime + 0.1; times.forEach(x => knockAt(c, t0 + x)); };
+
+  // Plucked string (Karplus–Strong): rings, then fades on its own
+  function pluck(freq) {
+    const c = ac(), sr = c.sampleRate;
+    const b = c.createBuffer(1, sr * 2.5, sr), d = b.getChannelData(0);
+    const N = Math.round(sr / freq), ring = new Float32Array(N);
+    for (let i = 0; i < N; i++) ring[i] = Math.random() * 2 - 1;
+    let k = 0;
+    for (let i = 0; i < d.length; i++) {
+      const nx = (k + 1) % N; d[i] = ring[k]; ring[k] = 0.4975 * (ring[k] + ring[nx]); k = nx;
+    }
+    const s = c.createBufferSource(); s.buffer = b;
+    const g = c.createGain(); g.gain.value = 0.8;
+    s.connect(g).connect(c.destination); s.start(c.currentTime + 0.05);
+  }
+
+  // Struck note: harmonics with exponential decay
+  function piano(freq) {
+    const c = ac(), t = c.currentTime + 0.05;
+    [[1, .5], [2, .25], [3, .12], [4, .06]].forEach(([h, a]) => {
+      const o = c.createOscillator(); o.frequency.value = freq * h;
+      const g = c.createGain(); g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(a, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 2.5 / (h * 0.7));
+      o.connect(g).connect(c.destination); o.start(t); o.stop(t + 2.5);
+    });
+  }
+
+  // Deliberate mistake: steady tone that never fades
+  function held(freq, dur) {
+    const c = ac(), t = c.currentTime + 0.05;
+    const o = c.createOscillator(); o.type = 'triangle'; o.frequency.value = freq;
+    const g = c.createGain(); g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.35, t + 0.02); g.gain.setValueAtTime(0.35, t + dur - 0.05);
+    g.gain.linearRampToValueAtTime(0, t + dur);
+    o.connect(g).connect(c.destination); o.start(t); o.stop(t + dur + 0.05);
+  }
+
+  const chord = freqs => freqs.forEach(piano);
+
+  function toggleNoise() {
+    const c = ac(), btn = document.getElementById('noiseBtn');
+    if (noise) { noise.stop(); noise = null; btn.textContent = 'Start background noise'; return; }
+    noise = c.createBufferSource(); noise.buffer = noiseBuffer(c, 4); noise.loop = true;
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700;
+    const g = c.createGain(); g.gain.value = 0.05;
+    noise.connect(lp).connect(g).connect(c.destination); noise.start();
+    btn.textContent = 'Stop background noise';
+  }
+
+  return { hum, claps, knocks, pluck, piano, held, chord, toggleNoise };
+})();
+</script>
+</body>
+</html>
