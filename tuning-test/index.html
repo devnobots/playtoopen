@@ -116,10 +116,27 @@ const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length 
 const rms = b => { let s = 0; for (let i = 0; i < b.length; i++) s += b[i] * b[i]; return Math.sqrt(s / b.length); };
 const cents = (f, ref) => 1200 * Math.log2(f / ref);
 
+// Same approach as the main app: iOS Safari refuses capture unless the audio session allows recording.
+async function openMic() {
+  if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
+  const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+  try { return await navigator.mediaDevices.getUserMedia(constraints); }
+  catch (err) {
+    if (err.name === 'NotAllowedError' && /permission|denied/i.test(err.message)) throw err;
+    await new Promise(r => setTimeout(r, 300));   // transient iOS audio session errors often clear on retry
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+}
+
 document.getElementById('start').onclick = async () => {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-  });
+  let stream;
+  try { stream = await openMic(); }
+  catch (err) {
+    document.getElementById('debug').textContent = /permission|denied/i.test(err.message)
+      ? 'Microphone permission denied. Allow it in Settings → Apps → Safari → Microphone.'
+      : 'Microphone blocked: close other audio apps, then reload (' + err.message + ')';
+    return;
+  }
   ctx = new AudioContext();
   await ctx.resume();
   analyser = ctx.createAnalyser();
