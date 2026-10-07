@@ -1,0 +1,110 @@
+{
+  "master": "master.png",
+  "width": 1672,
+  "height": 941,
+  "note": "All coordinates are in master pixels. Strips tile the frame exactly, left to right.",
+  "strips": [
+    {
+      "string": "E",
+      "hz": 82.41,
+      "file": "strip_1_E.png",
+      "x": 0,
+      "y": 0,
+      "w": 375,
+      "h": 941,
+      "sign": {
+        "x": 136,
+        "y": 190,
+        "w": 178,
+        "h": 95,
+        "cx": 225,
+        "cy": 237
+      }
+    },
+    {
+      "string": "A",
+      "hz": 110.0,
+      "file": "strip_2_A.png",
+      "x": 375,
+      "y": 0,
+      "w": 253,
+      "h": 941,
+      "sign": {
+        "x": 428,
+        "y": 213,
+        "w": 149,
+        "h": 81,
+        "cx": 502,
+        "cy": 253
+      }
+    },
+    {
+      "string": "D",
+      "hz": 146.83,
+      "file": "strip_3_D.png",
+      "x": 628,
+      "y": 0,
+      "w": 257,
+      "h": 941,
+      "sign": {
+        "x": 683,
+        "y": 145,
+        "w": 147,
+        "h": 84,
+        "cx": 756,
+        "cy": 187
+      }
+    },
+    {
+      "string": "G",
+      "hz": 196.0,
+      "file": "strip_4_G.png",
+      "x": 885,
+      "y": 0,
+      "w": 255,
+      "h": 941,
+      "sign": {
+        "x": 929,
+        "y": 114,
+        "w": 145,
+        "h": 85,
+        "cx": 1001,
+        "cy": 156
+      }
+    },
+    {
+      "string": "B",
+      "hz": 246.94,
+      "file": "strip_5_B.png",
+      "x": 1140,
+      "y": 0,
+      "w": 255,
+      "h": 941,
+      "sign": {
+        "x": 1186,
+        "y": 43,
+        "w": 143,
+        "h": 86,
+        "cx": 1257,
+        "cy": 86
+      }
+    },
+    {
+      "string": "e",
+      "hz": 329.63,
+      "file": "strip_6_highE.png",
+      "x": 1395,
+      "y": 0,
+      "w": 277,
+      "h": 941,
+      "sign": {
+        "x": 1446,
+        "y": 64,
+        "w": 113,
+        "h": 71,
+        "cx": 1502,
+        "cy": 99
+      }
+    }
+  ]
+}

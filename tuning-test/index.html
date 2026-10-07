@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tuning test</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #121826; color: #EFE6D2; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  h1 { font-weight: 600; font-size: 1.4rem; margin: 0 0 12px; }
+  #stage { position: relative; width: 100%; aspect-ratio: 1672 / 941; background: #000; overflow: hidden; }
+  #stage img { position: absolute; display: block; }
+  .ov { visibility: hidden; }
+  #start { font: inherit; font-size: 1.1rem; padding: 10px 18px; margin: 12px 0; cursor: pointer;
+           background: #C89B3C; color: #121826; border: 0; border-radius: 6px; }
+  #reset { font: inherit; padding: 8px 14px; margin-left: 8px; cursor: pointer; background: #2B2B2B; color: #EFE6D2; border: 0; border-radius: 6px; }
+  #rec { font: inherit; padding: 8px 14px; margin-left: 8px; cursor: pointer; background: #6E2A2A; color: #EFE6D2; border: 0; border-radius: 6px; }
+  #debug { font-family: ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.5; background: #1F2A44; padding: 10px; border-radius: 6px; white-space: pre; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Let's get you tuned up</h1>
+  <div id="stage"></div>
+  <button id="start">Start microphone</button><button id="reset">Reset ✓</button><button id="rec">Record 6 s</button>
+  <div id="debug">Microphone off.</div>
+</main>
+
+<script type="module">
+import { detectPitch } from './pitch.js';
+
+const IN_TUNE_CENTS = 10;     // ±10 cents counts as in tune
+const HOLD_SECONDS  = 0.5;    // must stay in tune this long to earn the ✓
+const SILENCE_RESET = 1.0;    // seconds of silence before an arrow clears
+const MEMORY_SECONDS = 0.4;  // a reading counts for this long, so one missed frame doesn't reset everything
+const LEAVE_CHECK   = 0.3;    // seconds out of tune before a ✓ turns back into an arrow
+const OVERLAY_SIZE  = 0.85;   // overlay height as a fraction of the sign height
+const WINDOW        = 8192;   // samples per analysis frame (tuner apps use 8192; steadier low E)
+const ONSET_RATIO   = 3;      // a level jump this big = a new pluck: forget old readings
+const ATTACK_SKIP   = 0.15;   // seconds of a new pluck to ignore (the attack is noisy and sharp)
+const STABLE_FRAMES = 4;      // readings that must agree before a sign changes
+const STABLE_CENTS  = 30;     // how closely those readings must agree
+
+const cfg = await (await fetch('strips.json')).json();
+const W = cfg.width, H = cfg.height;
+const stage = document.getElementById('stage');
+const pct = (v, total) => (v / total * 100) + '%';
+
+// 1. Lay out the six strips side by side, exactly as in strips.json
+const strings = cfg.strips.map(s => {
+  const img = document.createElement('img');
+  img.src = s.file;
+  Object.assign(img.style, { left: pct(s.x, W), top: pct(s.y, H), width: pct(s.w, W), height: pct(s.h, H) });
+  stage.appendChild(img);
+
+  // 2. Three overlays per sign, same fixed box, centred on the sign
+  const size = s.sign.h * OVERLAY_SIZE;
+  const ov = {};
+  for (const name of ['up', 'down', 'check']) {
+    const o = document.createElement('img');
+    o.src = 'overlays/' + name + '.png';
+    o.className = 'ov';
+    Object.assign(o.style, {
+      left: pct(s.sign.cx - size / 2, W), top: pct(s.sign.cy - size / 2, H),
+      width: pct(size, W), height: pct(size, H)
+    });
+    stage.appendChild(o);
+    ov[name] = o;
+  }
+  return { name: s.string, hz: s.hz, ov, state: 'blank', inTuneSince: null, outSince: null };
+});
+
+function show(st, state, why = '') {
+  if (st.state === state) return;
+  logChange(st.name, st.state, state, why);
+  st.state = state;
+  for (const k of ['up', 'down', 'check']) st.ov[k].style.visibility = (k === state) ? 'visible' : 'hidden';
+}
+
+document.getElementById('reset').onclick = () => strings.forEach(st => { st.inTuneSince = null; show(st, 'blank', 'reset'); });
+
+// 3. Microphone
+let ctx, analyser, buf, scaled, floor = 0.002, lastSound = 0;
+let recorder = null, recBuf = null;
+let prevShort = 0, attackUntil = 0;
+const changes = [];           // last few sign changes, shown in the debug panel
+function logChange(name, from, to, why) {
+  changes.unshift(`${new Date().toLocaleTimeString()}  ${name}: ${from} → ${to}  ${why}`);
+  if (changes.length > 8) changes.pop();
+}
+
+// Record 6 s of raw microphone audio and download it as a WAV (for checking the detector offline)
+document.getElementById('rec').onclick = () => {
+  if (!ctx) return;
+  const btn = document.getElementById('rec');
+  recBuf = []; btn.textContent = 'Recording… pluck now'; btn.disabled = true;
+  setTimeout(() => {
+    const chunks = recBuf; recBuf = null;
+    const n = chunks.reduce((a, c) => a + c.length, 0), sr = ctx.sampleRate;
+    const view = new DataView(new ArrayBuffer(44 + n * 2));
+    const str = (o, t) => [...t].forEach((ch, i) => view.setUint8(o + i, ch.charCodeAt(0)));
+    str(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, sr, true); view.setUint32(28, sr * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    str(36, 'data'); view.setUint32(40, n * 2, true);
+    let o = 44; for (const c of chunks) for (const v of c) { view.setInt16(o, Math.max(-1, Math.min(1, v)) * 32767, true); o += 2; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([view], { type: 'audio/wav' }));
+    a.download = 'tuning-recording.wav'; a.click();
+    btn.textContent = 'Record 6 s'; btn.disabled = false;
+  }, 6000);
+};
+const hzHistory = [];
+const median = a => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+const rms = b => { let s = 0; for (let i = 0; i < b.length; i++) s += b[i] * b[i]; return Math.sqrt(s / b.length); };
+const cents = (f, ref) => 1200 * Math.log2(f / ref);
+
+document.getElementById('start').onclick = async () => {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+  });
+  ctx = new AudioContext();
+  await ctx.resume();
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = WINDOW;
+  analyser.smoothingTimeConstant = 0;
+  const src = ctx.createMediaStreamSource(stream);
+  src.connect(analyser);
+  recorder = ctx.createScriptProcessor(4096, 1, 1);           // raw samples for the Record button
+  recorder.onaudioprocess = e => { if (recBuf) recBuf.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+  src.connect(recorder);
+  recorder.connect(ctx.destination);                           // required for onaudioprocess to fire; output is silent
+  buf = new Float32Array(WINDOW); scaled = new Float32Array(WINDOW);
+
+  // measure the room's quiet level for 1 s
+  document.getElementById('start').textContent = 'Stay quiet: measuring the room…';
+  const vals = []; const t0 = performance.now();
+  while (performance.now() - t0 < 1000) {
+    analyser.getFloatTimeDomainData(buf); vals.push(rms(buf));
+    await new Promise(r => requestAnimationFrame(r));
+  }
+  vals.sort((a, b) => a - b);
+  floor = Math.min(Math.max(vals[Math.floor(vals.length * 0.25)], 0.0005), 0.004);
+  document.getElementById('start').textContent = 'Listening';
+  document.getElementById('start').disabled = true;
+  loop();
+};
+
+// 4. Every frame: level → pitch → nearest string → state
+function loop() {
+  const now = performance.now() / 1000;
+  analyser.getFloatTimeDomainData(buf);
+  const level = rms(buf);
+  let raw = null;
+  // new pluck? (level of the newest 1024 samples jumps) -> forget old readings and skip the attack
+  let s2 = 0; for (let i = WINDOW - 1024; i < WINDOW; i++) s2 += buf[i] * buf[i];
+  const shortLevel = Math.sqrt(s2 / 1024);
+  if (shortLevel > prevShort * ONSET_RATIO && shortLevel > Math.max(floor * 3, 0.003)) { hzHistory.length = 0; attackUntil = now + ATTACK_SKIP; }
+  prevShort = shortLevel;
+  if (now >= attackUntil && level > Math.max(floor * 3, 0.003)) {
+    const g = Math.min(0.1 / level, 60);                // normalise so pitch.js's silence gate never hides a quiet string
+    for (let i = 0; i < WINDOW; i++) scaled[i] = buf[i] * g;
+    raw = detectPitch(scaled, ctx.sampleRate).freq || null;
+  }
+  if (raw && raw > 60 && raw < 1000) { hzHistory.push({ hz: raw, t: now }); lastSound = now; }
+  while (hzHistory.length && now - hzHistory[0].t > MEMORY_SECONDS) hzHistory.shift();
+  if (hzHistory.length > STABLE_FRAMES) hzHistory.shift();
+
+  let line = '';
+  const hs = hzHistory.map(h => h.hz);
+  const stable = hs.length >= STABLE_FRAMES && cents(Math.max(...hs), Math.min(...hs)) < STABLE_CENTS;
+  if (stable) {
+    const hz = median(hs);
+    const st = strings.reduce((best, s) => Math.abs(cents(hz, s.hz)) < Math.abs(cents(hz, best.hz)) ? s : best);
+    const c = cents(hz, st.hz);
+    if (Math.abs(c) <= IN_TUNE_CENTS) {
+      st.outSince = null;
+      if (st.state !== 'check') {
+        st.inTuneSince ??= now;
+        if (now - st.inTuneSince >= HOLD_SECONDS) show(st, 'check', `${hz.toFixed(1)} Hz, ${c.toFixed(0)} cents`);
+      }
+    } else {
+      st.inTuneSince = null;
+      if (st.state === 'check') {
+        // a ✓ string has gone out of tune: wait LEAVE_CHECK seconds (ignores the sharp pluck attack), then show the arrow
+        st.outSince ??= now;
+        if (now - st.outSince >= LEAVE_CHECK) { st.outSince = null; show(st, c < 0 ? 'up' : 'down', `${hz.toFixed(1)} Hz, ${c.toFixed(0)} cents`); }
+      } else {
+        show(st, c < 0 ? 'up' : 'down', `${hz.toFixed(1)} Hz, ${c.toFixed(0)} cents`);
+      }
+    }
+    // only the string being played shows an arrow; clear arrows on the others
+    for (const o of strings) if (o !== st && o.state !== 'check') { o.inTuneSince = null; show(o, 'blank', `another string (${st.name}) played`); }
+    line = `heard ${hz.toFixed(1)} Hz → string ${st.name} (target ${st.hz} Hz), ${c >= 0 ? '+' : ''}${c.toFixed(1)} cents → ${st.state}`;
+  } else if (now - lastSound > SILENCE_RESET) {
+    for (const o of strings) if (o.state !== 'check') { o.inTuneSince = null; show(o, 'blank', 'silence'); }
+    line = 'silence';
+  } else line = 'listening…';
+
+  document.getElementById('debug').textContent =
+    `level ${level.toFixed(4)} (room ${floor.toFixed(4)})   raw pitch ${raw ? raw.toFixed(1) + ' Hz' : '–'}\n` + line + '\n' +
+    strings.map(s => `${s.name}:${s.state}`).join('  ') + '\n\nLast sign changes:\n' + changes.join('\n');
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
